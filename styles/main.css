@@ -1466,6 +1466,7 @@ input{
   text-transform:uppercase;
   transition:all .3s ease;
   position:relative;
+  cursor:pointer;
 }
 .dropzone.hot{
   border-color:var(--a1);
@@ -2553,4 +2554,15 @@ body.dragging .fx-corner-frame{
   font-size:9px;
   letter-spacing:1px;
   color:var(--txt3);
+}
+
+/* hidden file pickers + media element (keep in DOM, off-screen) */
+#fileInput, #folderInput, #audioPlayer{
+  position:fixed;
+  left:-9999px;
+  top:0;
+  width:1px;
+  height:1px;
+  opacity:0;
+  overflow:hidden;
 }

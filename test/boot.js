@@ -204,6 +204,21 @@ if (A.failures.length) console.log('  failed parts: ' + A.failures.join(', '));
 const need = ['math', 'gl', 'play', 'audio', 'demo', 'lib', 'input'];
 const missing = need.filter(k => !A[k]);
 console.log('globals:', need.map(k => (A[k] ? k + '✓' : k + '✗')).join(' '));
+
+/* regression: file-only records must get a blob URL and land in the queue
+   (this was the "upload does nothing / songs don't play" bug) */
+try {
+  const fake = { name: 'signal.mp3', file: { name: 'signal.mp3', size: 12 }, type: 'audio', ext: 'mp3', folder: 'DIRECT' };
+  const n = A.play.addTracks([fake], { autoplay: false });
+  if (n !== 1 || !fake.url || A.play.list.length < 1) {
+    errors.push('addTracks skipped a file-only record (got ' + n + ', url=' + fake.url + ')');
+  } else {
+    console.log('addTracks file-only: ✓ url=' + fake.url);
+  }
+} catch (e) {
+  errors.push('addTracks: ' + (e && e.stack || e));
+}
+
 const ok = errors.length === 0 && A.failures.length === 0 && missing.length === 0;
 console.log(ok ? '\nBOOT OK ✓' : '\nBOOT FAILED ✗');
 process.exit(ok ? 0 : 1);

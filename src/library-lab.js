@@ -39,6 +39,10 @@ Aqua.addPart('library-lab', function initLibraryLab(){
   const bus  = A.bus;
   const S    = A.settings;
   const Q    = A.play;
+  if(!Q || !Q.list){
+    console.error('[Aqua Lib] playback queue missing — library cannot bind');
+    return;
+  }
   const CFG  = A.config;
   const FMT  = A.math.AFormat;
   const M    = A.math.AMath;
@@ -75,8 +79,9 @@ Aqua.addPart('library-lab', function initLibraryLab(){
     if(mime.indexOf('audio') === 0)          return { type: 'audio', ext };
     if(ext === 'mp4' || ext === 'webm' || ext === 'mov' || ext === 'm4v') return { type: 'video', ext };
     if(ext === 'mp3' || ext === 'flac' || ext === 'ogg' || ext === 'oga' ||
-       ext === 'wav' || ext === 'm4a' || ext === 'aac' || ext === 'opus' ||
-       ext === 'webm' || ext === 'aiff')     return { type: 'audio', ext };
+       ext === 'wav' || ext === 'wave' || ext === 'm4a' || ext === 'aac' ||
+       ext === 'opus' || ext === 'webm' || ext === 'aiff' || ext === 'aif' ||
+       ext === 'wma' || ext === 'mp2' || ext === 'weba') return { type: 'audio', ext };
     return null;
   }
 
@@ -203,18 +208,23 @@ Aqua.addPart('library-lab', function initLibraryLab(){
     }
 
     if(addedRecs.length){
-      const payload = addedRecs.map(toTransportRecord);
+      /* pass the same objects so addTracks can stamp url onto the
+         display records (queueIndex matches by file reference). */
       try{
-        Q.addTracks(payload, { autoplay: opts.autoplay !== false });
+        Q.addTracks(addedRecs, { autoplay: opts.autoplay !== false });
       }catch(err){
         A.showBanner('IMPORT: ' + (err && err.message || err), 4000);
       }
+      const dock = el('dock');
+      if(dock) dock.classList.add('show');
+      const dive = el('dive');
+      if(dive) dive.classList.remove('on');
       LIB.dirty = true;
       bus.emit('lib:added', addedRecs.length);
       A.toast('+' + addedRecs.length + ' signal' + (addedRecs.length === 1 ? '' : 's') + ' synced', '⬡');
     }else{
       if(files.length){
-        A.toast('Nothing new to sync', '·');
+        A.toast('No new audio/video files to sync', '·');
       }
     }
     renderChips();
@@ -264,7 +274,12 @@ Aqua.addPart('library-lab', function initLibraryLab(){
   /* lazily probe a track's duration with a detached probe element so
      the list can show lengths without disturbing the live player */
   function probeDuration(rec, cb){
+    if(typeof cb !== 'function') cb = function(){};
     if(rec.duration != null){ cb(rec.duration); return; }
+    if(!rec.url){
+      const idx = queueIndex(rec);
+      if(idx >= 0 && Q.list[idx] && Q.list[idx].url) rec.url = Q.list[idx].url;
+    }
     if(!rec.url){ cb(null); return; }
     const probe = document.createElement(rec.type === 'video' ? 'video' : 'audio');
     probe.preload = 'metadata';
@@ -650,7 +665,7 @@ Aqua.addPart('library-lab', function initLibraryLab(){
       function readBatch(){
         reader.readEntries((batch) => {
           if(!batch.length){ finish(); return; }
-          const pending = batch.length;
+          let pending = batch.length;
           for(let i = 0; i < batch.length; i++){
             const childPath = path ? (path + '/' + batch[i].name) : batch[i].name;
             walkEntry(batch[i], childPath, (files) => {
@@ -669,9 +684,9 @@ Aqua.addPart('library-lab', function initLibraryLab(){
 
   function wireDrop(){
     const windowDrag = (e) => {
-      if(!e.dataTransfer) return;
-      if(e.type === 'dragenter' || e.type === 'dragover'){
-        e.preventDefault();
+      e.preventDefault();
+      if(e.dataTransfer){
+        try{ e.dataTransfer.dropEffect = 'copy'; }catch(_){}
       }
     };
     window.addEventListener('dragenter', (e) => {
@@ -693,12 +708,13 @@ Aqua.addPart('library-lab', function initLibraryLab(){
       }
     });
     window.addEventListener('drop', (e) => {
-      if(!hasFiles(e)) return;
       e.preventDefault();
       dropDepth = 0;
       veilOff();
+      if(!e.dataTransfer) return;
       filesFromDataTransfer(e.dataTransfer, (files) => {
         if(files.length) importFiles(files, { autoplay: true });
+        else A.toast('Nothing droppable in that payload', '·');
       });
     });
   }
@@ -733,13 +749,30 @@ Aqua.addPart('library-lab', function initLibraryLab(){
       });
     }
 
-    const openFiles  = () => { try{ fileInput.click(); }catch(_){} };
-    const openFolder = () => { try{ folderInput.click(); }catch(_){} };
+    const openFiles  = () => { try{ if(fileInput) fileInput.click(); }catch(_){} };
+    const openFolder = () => {
+      try{
+        if(folderInput && ('webkitdirectory' in folderInput || folderInput.hasAttribute('webkitdirectory'))){
+          folderInput.click();
+        }else{
+          openFiles();
+        }
+      }catch(_){ openFiles(); }
+    };
 
     bind('btnAddFiles', openFiles);
     bind('btnAddFolder', openFolder);
     bind('btnFiles', openFiles);       // dive screen
     bind('btnFolder', openFolder);     // dive screen
+
+    const dz = el('dropzone');
+    if(dz){
+      dz.style.cursor = 'pointer';
+      dz.addEventListener('click', (e) => {
+        e.preventDefault();
+        openFiles();
+      });
+    }
   }
 
   function bind(id, fn){
@@ -1242,8 +1275,60 @@ Aqua.addPart('library-lab', function initLibraryLab(){
      BOOT
   ─────────────────────────────────────────────────────────────── */
 
+  /* pull any tracks that landed in the transport queue from outside
+     this part (demo generator, etc.) into the display list */
+  function ingestQueue(){
+    if(!Q || !Q.list) return;
+    for(let i = 0; i < Q.list.length; i++){
+      const t = Q.list[i];
+      let found = false;
+      for(let j = 0; j < LIB.rows.length; j++){
+        const r = LIB.rows[j];
+        if((t.file && r.file === t.file) || (t.url && r.url === t.url) || (t.src && r.url === t.src)){
+          if(!r.url) r.url = t.url || t.src || r.url;
+          found = true;
+          break;
+        }
+      }
+      if(found) continue;
+      LIB.rows.push({
+        id: LIB.nextId++,
+        file: t.file || t.blob || null,
+        name: t.name || ('Track ' + (i + 1)),
+        base: baseName(t.name || ('Track ' + (i + 1))),
+        ext: t.ext || '',
+        type: t.type === 'video' ? 'video' : 'audio',
+        folder: t.folder || 'DIRECT',
+        size: t.size || (t.file && t.file.size) || 0,
+        duration: t.duration || null,
+        url: t.url || t.src || null,
+        _row: null
+      });
+    }
+    /* prune display rows whose files left the queue */
+    const keep = new Set();
+    for(let i = 0; i < Q.list.length; i++){
+      const t = Q.list[i];
+      if(t.file) keep.add(t.file);
+      if(t.url) keep.add(t.url);
+    }
+    for(let i = LIB.rows.length - 1; i >= 0; i--){
+      const r = LIB.rows[i];
+      if((r.file && keep.has(r.file)) || (r.url && keep.has(r.url))) continue;
+      if(r._row && r._row.parentNode) r._row.parentNode.removeChild(r._row);
+      LIB.rows.splice(i, 1);
+    }
+  }
+
   bus.on('search:input', onSearch);
   bus.on('queue:changed', () => {
+    ingestQueue();
+    renderChips();
+    renderList();
+    updateCount();
+  });
+  bus.on('lib:added', () => {
+    ingestQueue();
     renderChips();
     renderList();
     updateCount();

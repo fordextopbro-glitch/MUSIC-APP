@@ -319,9 +319,9 @@ try{
 <!-- ═══════════ TOASTS / BANNERS / HIDDEN ═══════════ -->
 <div id="toasts"></div>
 <div id="engineBanner"></div>
-<input type="file" id="folderInput" multiple accept="audio/*,video/*" webkitdirectory>
-<input type="file" id="fileInput" multiple accept="audio/*,video/*">
-<audio id="audioPlayer"></audio>
+<input type="file" id="folderInput" multiple webkitdirectory directory>
+<input type="file" id="fileInput" multiple accept="audio/*,video/*,.mp3,.flac,.wav,.ogg,.oga,.m4a,.aac,.opus,.aiff,.mp4,.webm,.mov,.m4v">
+<audio id="audioPlayer" preload="auto" playsinline></audio>
 
 <script src="src/kernel.js"></script>
 <script src="src/core-math.js"></script>

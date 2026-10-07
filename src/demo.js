@@ -791,11 +791,19 @@ Aqua.addPart('demo', function initDemo(){
     const wav = interleaveToWav(frame.buf, seconds);
     const url = URL.createObjectURL(wav);
     const ms = Math.round(performance.now() - t0);
+    const fileName = entry.name + '.wav';
+    let file = wav;
+    try{
+      file = new File([wav], fileName, { type: 'audio/wav' });
+    }catch(_){}
     const rec = {
-      name: entry.name,
+      name: fileName,
+      file: file,
+      type: 'audio',
       ext: 'wav',
       kind: 'audio',
       isVideo: false,
+      url: url,
       src: url,
       blob: wav,
       size: wav.size,
@@ -834,7 +842,7 @@ Aqua.addPart('demo', function initDemo(){
     let i = 0;
     function step(){
       if(i >= SET.length){
-        finish(records, t0);
+        finish(records, t0, autoplay);
         return;
       }
       const entry = SET[i];
@@ -852,7 +860,8 @@ Aqua.addPart('demo', function initDemo(){
     step();
   }
 
-  function finish(records, t0){
+  function finish(records, t0, shouldPlay){
+    shouldPlay = shouldPlay !== false;
     clearDemo();
     /* insert the demo set.  If the queue was empty, it becomes the
        whole queue; otherwise it's appended. */
@@ -863,18 +872,15 @@ Aqua.addPart('demo', function initDemo(){
     generated++;
     A.toast('DEMO SET READY — ' + records.length + ' tracks · ' + totalMs + 'ms', '◈', 3500);
 
-    if(autoplay){
-      /* play the first demo track (index 0 after addTracks keeps
-         index at its previous value, so find the first demo) */
+    if(shouldPlay){
       const idx = Q.list.findIndex(r => r._demo);
       if(idx >= 0){
-        Q.index = idx;
         const au = A.audio;
         try{ if(au && au.build) au.build(); }catch(err){
           A.showBanner('AUDIO ENGINE OFFLINE', 4000); return;
         }
         try{ if(au && au.resume) au.resume(); }catch(_){}
-        Q.play();
+        Q.play(idx);
       }
     }
     /* refresh the library (p07) so the demo tracks appear there */

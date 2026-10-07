@@ -7109,6 +7109,10 @@ registerProcessor("neonfx", NeonFXProcessor);
   function buildGraph(){
     if(built) return;
     if(!ensureCtx()) throw new Error('AudioContext unavailable');
+    /* Creating MediaElementSource while the context is suspended
+       steals the element's speakers and outputs into a muted graph.
+       Only capture the element once audio is actually running. */
+    if(ctx.state !== 'running') return;
 
     const srcA = ctx.createMediaElementSource(el.audio);
     let srcV = null;
@@ -7135,8 +7139,9 @@ registerProcessor("neonfx", NeonFXProcessor);
       mk('highshelf', 10000, S.treble)
     ];
 
-    /* Hub always feeds the EQ so audio is never silent while FX boots.
-       Pitch worklet (if available) is spliced in later. */
+    /* Direct path: element → hub → EQ → … → speakers.
+       Do NOT splice the pitch worklet into this chain — it output
+       silence (4096-sample hold + WSOLA) and killed playback. */
     const hub = ctx.createGain();
     hub.gain.value = 1;
     srcA.connect(hub);
@@ -7144,34 +7149,6 @@ registerProcessor("neonfx", NeonFXProcessor);
     hub.connect(eq[0]);
     fxMode = 'coupled';
     workletNode = null;
-
-    if(ctx.audioWorklet){
-      const src = GRAN_PITCH_SRC + WORKLET_TAIL;
-      const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
-      ctx.audioWorklet.addModule(url).then(() => {
-        try{ URL.revokeObjectURL(url); }catch(_){}
-        if(!nodes) return;
-        const node = new AudioWorkletNode(ctx, 'neonfx', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          outputChannelCount: [2]
-        });
-        node.port.postMessage({ type: 'pitch', v: 1 });
-        node.port.postMessage({ type: 'width', v: S.width / 100 });
-        try{ hub.disconnect(eq[0]); }catch(_){}
-        hub.connect(node);
-        node.connect(eq[0]);
-        workletNode = node;
-        fxMode = 'worklet';
-        applySpeedPitch();
-        applyWidth();
-      }).catch(() => {
-        fxMode = 'coupled';
-        try{ hub.disconnect(); }catch(_){}
-        try{ hub.connect(eq[0]); }catch(_){}
-        applySpeedPitch();
-      });
-    }
 
     /* reverb send/return */
     let prev = eq[4];
@@ -7229,9 +7206,11 @@ registerProcessor("neonfx", NeonFXProcessor);
 
   /* resume on user gesture (autoplay policy) */
   function resumeCtx(){
-    if(ctx && ctx.state === 'suspended'){
-      ctx.resume().catch(() => {});
+    if(!ctx) return Promise.resolve();
+    if(ctx.state === 'suspended' || ctx.state === 'interrupted'){
+      return ctx.resume().catch(() => {});
     }
+    return Promise.resolve();
   }
 
   /* ═════════════════════════════════════════════════════════════
@@ -7398,14 +7377,7 @@ registerProcessor("neonfx", NeonFXProcessor);
       }
       i = i | 0;
       if(i < 0 || i >= this.list.length) return;
-      try{
-        buildGraph();
-      }catch(err){
-        Aqua.showBanner('AUDIO ENGINE OFFLINE: ' + (err && err.message || 'AudioContext unavailable'), 5000);
-        Aqua.toast('Web Audio unavailable in this browser', '⚠');
-        return;
-      }
-      resumeCtx();
+      try{ ensureCtx(); }catch(_){}
       this.index = i;
       const t = this.list[i];
       const url = t.url || t.src;
@@ -7424,11 +7396,20 @@ registerProcessor("neonfx", NeonFXProcessor);
       }else{
         closeTheater(true);
       }
+      media.muted = false;
+      if(!built){
+        media.volume = S.muted ? 0 : AMath.clamp01(S.volume);
+      }
       try{ media.pause(); }catch(_){}
       media.src = url;
       try{ media.currentTime = 0; }catch(_){}
       applySpeedPitch();
+      applyVolume();
       const start = () => {
+        try{ if(ctx && ctx.state === 'running') buildGraph(); }catch(err){
+          console.warn('[Aqua Play] graph:', err);
+        }
+        applyVolume();
         const p = media.play();
         if(p && p.catch){
           p.catch(err => {
@@ -7447,11 +7428,7 @@ registerProcessor("neonfx", NeonFXProcessor);
           });
         }
       };
-      if(ctx && ctx.state === 'suspended'){
-        ctx.resume().then(start).catch(start);
-      }else{
-        start();
-      }
+      resumeCtx().then(start);
       this.state = 'playing';
       updatePod(t);
       updateDockMeta();
@@ -7474,12 +7451,31 @@ registerProcessor("neonfx", NeonFXProcessor);
     },
 
     toggle(){
-      if(this.state === 'playing') this.pause();
-      else if(this.state === 'paused' && this.current){
-        const media = this.current.type === 'video' ? el.video : el.audio;
-        resumeCtx();
-        const p = media.play();
-        if(p && p.catch) p.catch(() => {});
+      const t = this.current;
+      const media = t ? (t.type === 'video' ? el.video : el.audio) : el.audio;
+      const actuallyPlaying = !!(t && media && !media.paused);
+      /* If the graph is suspended the element can look "playing" while
+         you hear nothing — wake the context instead of pausing. */
+      if(ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')){
+        resumeCtx().then(() => {
+          if(t){
+            media.muted = false;
+            const p = media.play();
+            if(p && p.catch) p.catch(() => {});
+          }
+        });
+        this.state = 'playing';
+        syncTransportUI();
+        setLed(true);
+        return;
+      }
+      if(actuallyPlaying) this.pause();
+      else if(t){
+        resumeCtx().then(() => {
+          media.muted = false;
+          const p = media.play();
+          if(p && p.catch) p.catch(() => {});
+        });
         this.state = 'playing';
         syncTransportUI();
         Aqua.bus.emit('audio:playing', true);
@@ -7616,9 +7612,24 @@ registerProcessor("neonfx", NeonFXProcessor);
   }
 
   function unlockAudio(){
-    try{ if(!built) buildGraph(); }catch(_){}
-    resumeCtx();
+    /* Wake the AudioContext on a real gesture.  Attach the Web Audio
+       graph only after it is running so the <audio> element can still
+       speak natively if the context is blocked. */
+    try{ ensureCtx(); }catch(_){}
     playBlocked = false;
+    resumeCtx().then(() => {
+      if(ctx && ctx.state === 'running'){
+        try{ buildGraph(); }catch(_){}
+      }
+      if(Q.state === 'playing' && Q.current){
+        const t = Q.current;
+        const media = t.type === 'video' ? el.video : el.audio;
+        if(media && media.paused){
+          const p = media.play();
+          if(p && p.catch) p.catch(() => {});
+        }
+      }
+    });
   }
 
   function setLed(playing){

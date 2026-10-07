@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>NEONCORE — Futuristic 3D Music System</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 5 L95 50 L50 95 L5 50 Z' fill='none' stroke='%2300e5ff' stroke-width='8'/%3E%3Ccircle cx='50' cy='50' r='14' fill='%23ff2d95'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/main.css">
+<script>
+/* ── theme pre-paint (no flash) — default: dark / "VOID" ─────────────
+   Stored key: aqua.theme  →  'dark' | 'light'
+   Dark = VOID  (black void, neon cyan / magenta / violet)
+   Light= CHROME (pale chrome, electric blue / orange / violet)        */
+try{
+  var _t = localStorage.getItem('aqua.theme');
+  if(_t !== 'light' && _t !== 'dark'){ _t = 'dark'; }
+  document.documentElement.dataset.theme = _t;
+  document.documentElement.style.colorScheme = _t;
+}catch(e){
+  document.documentElement.dataset.theme = 'dark';
+}
+</script>
+</head>
+<body>
+
+<!-- ═══════════ FX LAYERS (2D fallback canvas + WebGL canvas + overlays) ═══════════ -->
+<canvas id="fx2d"></canvas>
+<canvas id="glCanvas"></canvas>
+<div class="fx-scanlines"></div>
+<div class="fx-vignette"></div>
+<div class="fx-corner-frame"><i class="cfbr"></i><i class="cflt"></i></div>
+
+<noscript>
+  <div style="position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;background:#020308;color:#00e5ff;font-family:monospace;letter-spacing:2px;text-align:center;padding:30px;">
+    NEONCORE REQUIRES JAVASCRIPT TO INITIALIZE THE 3D AUDIO ENGINE
+  </div>
+</noscript>
+
+<div id="app">
+
+  <!-- ═══════════ HEADER HUD ═══════════ -->
+  <header id="hudTop">
+    <div class="brand-block">
+      <div class="logo-dia"><span class="core"></span></div>
+      <div class="brand-txt">
+        <b>NEONCORE</b>
+        <span>3D MUSIC SYSTEM · V3</span>
+      </div>
+    </div>
+
+    <div class="status-block">
+      <span class="stat"><i class="led" id="ledEngine"></i><span id="statEngine">ENGINE: BOOT</span></span>
+      <span class="stat"><i class="led" id="ledAudio"></i><span id="statAudio">AUDIO: IDLE</span></span>
+      <span class="stat"><span id="statFps">-- FPS</span></span>
+    </div>
+
+    <div class="search-block" id="searchWrap">
+      <span class="s-ico">⌕</span>
+      <input id="searchInput" placeholder="SCAN LIBRARY…  [ / ]" autocomplete="off" spellcheck="false">
+      <span id="searchCount">0</span>
+      <button id="searchClear" title="Clear">✕</button>
+    </div>
+
+    <div class="actions-block">
+      <button class="hud-btn round only-narrow" id="btnLib" title="Library">☰</button>
+      <button class="hud-btn" id="btnLab" title="Core Lab (L)">⚙ <span class="lbl">Lab</span></button>
+      <button class="hud-btn round" id="themeBtn" title="Theme (T)">
+        <span class="ring"></span>
+        <span id="themeIcon">◐</span>
+      </button>
+      <button class="hud-btn primary" id="btnAddFolder">▣ <span class="lbl">Folder</span></button>
+      <button class="hud-btn" id="btnAddFiles">♪ <span class="lbl">Files</span></button>
+    </div>
+  </header>
+
+  <!-- ═══════════ LIBRARY PANEL ═══════════ -->
+  <aside id="libPanel">
+    <i class="cnr tl"></i><i class="cnr br"></i>
+    <div class="lib-head">
+      <span class="lh-title">▤ Library</span>
+      <span class="lh-count" id="libCount">0 TKS</span>
+      <button id="libCollapse" title="Collapse">⟨</button>
+    </div>
+    <div class="lib-chips" id="libChips"></div>
+    <div class="lib-list" id="libList">
+      <div class="lib-empty">
+        <span class="big">⬡</span>
+        NO SIGNAL DETECTED<br>
+        OPEN A FOLDER TO SYNC
+      </div>
+    </div>
+  </aside>
+
+  <!-- ═══════════ STAGE (3D scene lives behind; overlays below) ═══════════ -->
+  <main id="stage">
+
+    <div id="stageReadouts">
+      <div class="tr-top" id="trTop">
+        <div class="trt-label">Tracking</div>
+        <div class="trt-name" id="trName">—</div>
+      </div>
+      <div class="tr-bot" id="trBot">
+        <div class="trb"><span class="trb-k">Signal</span><span class="trb-v" id="trSig">STANDBY</span></div>
+        <div class="trb"><span class="trb-k">Time</span><span class="trb-v" id="trTime">00:00</span></div>
+        <div class="trb"><span class="trb-k">Seq</span><span class="trb-v" id="trSeq">--/---</span></div>
+      </div>
+    </div>
+
+    <!-- dive / boot screen -->
+    <section class="screen on" id="dive">
+      <div class="dive-frame">
+        <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+        <div class="dive-badge"><i class="led on"></i> SYSTEM READY · ALL CHANNELS OPEN</div>
+        <h1 class="dive-title"><span>NEON</span>CORE</h1>
+        <p class="dive-sub">Futuristic 3D Music Interface · Realtime Audio Reactor</p>
+        <div class="dive-btns">
+          <button class="neon-btn primary" id="btnFolder"><span class="n-ico">▣</span>Open Folder</button>
+          <button class="neon-btn" id="btnFiles"><span class="n-ico">♪</span>Pick Files</button>
+        </div>
+        <div class="dropzone" id="dropzone">⇩ &nbsp;or drop files / folders into the grid</div>
+        <div class="dive-spec">
+          <div class="spec"><span class="s-k">Engine</span><span class="s-v" id="specEngine">WEBGL2 · 60HZ</span></div>
+          <div class="spec"><span class="s-k">Audio</span><span class="s-v">WEB AUDIO · 24 NODES</span></div>
+          <div class="spec"><span class="s-k">Formats</span><span class="s-v">MP3 · FLAC · MP4 · OGG</span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ═══════════ DOCK ═══════════ -->
+<div id="dock">
+  <div id="dockProg"><div class="dp-bg"></div><div id="dockFill"></div></div>
+  <div class="dock-in">
+    <div id="dockOpen" title="Open listening room">
+      <div class="dock-disc"><span class="dd-core"></span></div>
+      <div class="dock-meta">
+        <div class="dock-title" id="dockTitle">NO TRACK LOADED</div>
+        <div class="dock-sub" id="dockSub">AWAITING INPUT SIGNAL</div>
+      </div>
+    </div>
+    <div class="dock-transport">
+      <button class="tbtn" id="dShuffle" title="Shuffle (S)">⤨</button>
+      <button class="tbtn" id="dPrev" title="Previous (P)">⏮</button>
+      <button class="tbtn" id="dBack" title="-10s (←)">«</button>
+      <button class="tbtn play" id="dPlay" title="Play / Pause (Space)">▶</button>
+      <button class="tbtn" id="dFwd" title="+10s (→)">»</button>
+      <button class="tbtn" id="dNext" title="Next (N)">⏭</button>
+      <button class="tbtn" id="dRepeat" title="Repeat (R)">⟳</button>
+    </div>
+    <div class="dock-vol">
+      <button class="tbtn" id="dMute" title="Mute (M)">🔊</button>
+      <input class="slider" id="dockVol" type="range" min="0" max="1" step="0.01" value="0.8">
+    </div>
+    <button id="podOpenBtn">⌁ Pod</button>
+  </div>
+</div>
+
+<!-- ═══════════ POD (listening room) ═══════════ -->
+<div id="pod">
+  <button id="podClose" title="Collapse (Esc)">✕</button>
+  <div class="pod-data">
+    <i class="cnr tl"></i><i class="cnr br"></i>
+    <div class="pod-kicker">Now Tracking <span class="cursor">▮</span></div>
+    <h2 id="podTitle">—</h2>
+    <div class="pod-grid">
+      <div class="pod-cell"><span class="pc-k">Type</span><span class="pc-v" id="podType">—</span></div>
+      <div class="pod-cell"><span class="pc-k">Format</span><span class="pc-v" id="podExt">—</span></div>
+      <div class="pod-cell"><span class="pc-k">Source</span><span class="pc-v" id="podFolder">—</span></div>
+      <div class="pod-cell"><span class="pc-k">Sequence</span><span class="pc-v" id="podSeq">—</span></div>
+    </div>
+    <div>
+      <div class="pod-canvas-hd">
+        <span class="label">Spectrum Analyzer</span>
+        <span class="readout" id="specBpm">--Hz</span>
+      </div>
+      <canvas id="spectrumCanvas" width="720" height="128"></canvas>
+    </div>
+    <div>
+      <div class="pod-canvas-hd">
+        <span class="label">Waveform</span>
+        <span class="readout" id="waveDb">-∞ dB</span>
+      </div>
+      <canvas id="waveCanvas" width="720" height="112"></canvas>
+    </div>
+    <div class="pod-seek">
+      <span class="ptime" id="seekCur">00:00</span>
+      <input class="slider big" id="seek" type="range" min="0" max="1000" value="0">
+      <span class="ptime" id="seekTot">00:00</span>
+    </div>
+    <div class="pod-transport">
+      <button class="tbtn" id="pShuffle" title="Shuffle (S)">⤨</button>
+      <button class="tbtn" id="pPrev" title="Previous (P)">⏮</button>
+      <button class="tbtn" id="pBack" title="-10s">«</button>
+      <button class="tbtn play" id="pPlay" title="Play / Pause (Space)">▶</button>
+      <button class="tbtn" id="pFwd" title="+10s">»</button>
+      <button class="tbtn" id="pNext" title="Next (N)">⏭</button>
+      <button class="tbtn" id="pRepeat" title="Repeat (R)">⟳</button>
+    </div>
+    <div class="pod-hint">[ ESC ] collapse · [ L ] core lab · [ DBL-CLICK ] 3D orbit boost</div>
+  </div>
+</div>
+
+<!-- ═══════════ CORE LAB (right panel) ═══════════ -->
+<aside id="labPanel">
+  <i class="cnr tl"></i><i class="cnr bl"></i>
+  <div class="lab-head">
+    <span class="lt">⚙ CORE <b>LAB</b></span>
+    <button id="labClose" title="Close (L)">✕</button>
+  </div>
+  <div class="lab-body">
+
+    <div class="sec-hd">Presets <span class="hd-r">FX-01</span></div>
+    <div class="presets" id="presetGrid">
+      <button class="pbtn active" data-preset="normal"><span class="p-ico">◈</span>Normal</button>
+      <button class="pbtn" data-preset="reverb"><span class="p-ico">≋</span>Reverb</button>
+      <button class="pbtn" data-preset="cave"><span class="p-ico">▣</span>Cave</button>
+      <button class="pbtn" data-preset="stadium"><span class="p-ico">⬢</span>Stadium</button>
+      <button class="pbtn" data-preset="bathroom"><span class="p-ico">◍</span>Bathroom</button>
+      <button class="pbtn" data-preset="underwater"><span class="p-ico">≀</span>Underwater</button>
+      <button class="pbtn" data-preset="lofi"><span class="p-ico">∿</span>Lo-Fi</button>
+      <button class="pbtn" data-preset="concert"><span class="p-ico">♒</span>Concert</button>
+    </div>
+
+    <div class="sec-hd">Reverb Matrix <span class="hd-r">FX-02</span></div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Reverb Mix</span><span class="fx-val" id="reverbV">0%</span></div>
+      <input class="slider" id="reverbS" type="range" min="0" max="100" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Room Size</span><span class="fx-val" id="roomV">50%</span></div>
+      <input class="slider" id="roomS" type="range" min="0" max="100" value="50">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Decay</span><span class="fx-val" id="decayV">2.0s</span></div>
+      <input class="slider" id="decayS" type="range" min="0.1" max="10" step="0.1" value="2">
+    </div>
+
+    <div class="sec-hd">Equalizer <span class="hd-r">FX-03</span></div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Bass · 60Hz</span><span class="fx-val" id="bassV">0dB</span></div>
+      <input class="slider" type="range" data-band="bass" min="-15" max="15" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Low-Mid · 250Hz</span><span class="fx-val" id="lowmidV">0dB</span></div>
+      <input class="slider" type="range" data-band="lowmid" min="-15" max="15" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Mid · 1kHz</span><span class="fx-val" id="midV">0dB</span></div>
+      <input class="slider" type="range" data-band="mid" min="-15" max="15" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">High-Mid · 4kHz</span><span class="fx-val" id="highmidV">0dB</span></div>
+      <input class="slider" type="range" data-band="highmid" min="-15" max="15" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Treble · 16kHz</span><span class="fx-val" id="trebleV">0dB</span></div>
+      <input class="slider" type="range" data-band="treble" min="-15" max="15" value="0">
+    </div>
+
+    <div class="sec-hd">Motion & Space <span class="hd-r">FX-04</span></div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Pitch Shift</span><span class="fx-val" id="pitchV">0</span></div>
+      <input class="slider" id="pitchS" type="range" min="-6" max="6" step="0.1" value="0">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Playback Speed</span><span class="fx-val" id="speedV">1.00x</span></div>
+      <input class="slider" id="speedS" type="range" min="0.5" max="2" step="0.05" value="1">
+    </div>
+    <div class="fx-row">
+      <div class="fx-top"><span class="fx-name">Stereo Width</span><span class="fx-val" id="widthV">100%</span></div>
+      <input class="slider" id="widthS" type="range" min="0" max="100" value="100">
+    </div>
+
+    <div class="sec-hd">Switches <span class="hd-r">SYS</span></div>
+    <div class="tgl-row"><span>Night Mode <span class="tgl-note">(COMPRESS)</span></span><div class="tgl" id="tglNight"><i></i></div></div>
+    <div class="tgl-row"><span>Dynamic Colors</span><div class="tgl on" id="tglDyn"><i></i></div></div>
+    <div class="tgl-row"><span>Auto Play Next</span><div class="tgl on" id="tglAuto"><i></i></div></div>
+
+    <div class="sec-hd">Render Tier <span class="hd-r">GPU</span></div>
+    <div class="tier-row" id="tierRow">
+      <button class="tier" data-tier="high">High</button>
+      <button class="tier active" data-tier="med">Med</button>
+      <button class="tier" data-tier="low">Low</button>
+    </div>
+
+    <div class="sec-hd">Signal Test <span class="hd-r">DSP</span></div>
+    <div class="fx-row">
+      <button class="hud-btn primary" id="demoBtn" style="width:100%;">◈ Generate Demo Signal</button>
+    </div>
+
+    <div class="fx-row" style="border-top:1px solid var(--line);margin-top:10px;padding-top:14px;">
+      <span class="label" style="line-height:2;">
+        ⌨ SPACE play · ← → 10s · N/P next/prev · S shuffle · R repeat<br>
+        ↑ ↓ volume · M mute · T theme · L lab · / search · ESC close
+      </span>
+    </div>
+  </div>
+</aside>
+
+<!-- ═══════════ THEATER (video) ═══════════ -->
+<div id="theater">
+  <div class="theater-bar">
+    <span class="tb-title" id="theaterTitle">—</span>
+    <span class="tb-hint">[ DBL-CLICK ] FULLSCREEN</span>
+    <button id="theaterClose" title="Close (Esc)">✕</button>
+  </div>
+  <div class="theater-frame">
+    <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+    <video id="videoPlayer" controls playsinline></video>
+  </div>
+</div>
+
+<!-- ═══════════ TOASTS / BANNERS / HIDDEN ═══════════ -->
+<div id="toasts"></div>
+<div id="engineBanner"></div>
+<input type="file" id="folderInput" multiple accept="audio/*,video/*" webkitdirectory>
+<input type="file" id="fileInput" multiple accept="audio/*,video/*">
+<audio id="audioPlayer"></audio>
+
+<script src="src/kernel.js"></script>
+<script src="src/core-math.js"></script>
+<script src="src/ambient2d.js"></script>
+<script src="src/gl-core.js"></script>
+<script src="src/geometry.js"></script>
+<script src="src/scene/galaxy.js"></script>
+<script src="src/playback.js"></script>
+<script src="src/library-lab.js"></script>
+<script src="src/input.js"></script>
+<script src="src/demo.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>

@@ -134,8 +134,8 @@ Aqua.addPart('input', function initInput(){
   /* ── individual actions ─────────────────────────────────────── */
 
   function safeAudio(fn){
+    const au = A.audio;
     try{
-      const au = A.audio;
       if(au && au.build) au.build();
     }catch(err){
       A.showBanner('AUDIO ENGINE OFFLINE: ' + (err && err.message || err), 4000);
@@ -641,6 +641,8 @@ Aqua.addPart('input', function initInput(){
   function dismissDive(){
     const dive = el('dive');
     if(dive) dive.classList.remove('on');
+    const dock = el('dock');
+    if(dock) dock.classList.add('show');
   }
 
   /* ───────────────────────────────────────────────────────────────

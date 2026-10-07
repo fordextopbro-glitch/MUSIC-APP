@@ -420,6 +420,7 @@ registerProcessor("neonfx", NeonFXProcessor);
   let nodes = null;           /* {srcA, srcV, fx, eq[5], dry, conv, wet, mix, analyser, master} */
   let workletNode = null;
   let irCache = null;         /* {key, buffer} */
+  let playBlocked = false;    /* autoplay policy blocked media.play() */
 
   function ensureCtx(){
     if(ctx) return true;
@@ -437,6 +438,10 @@ registerProcessor("neonfx", NeonFXProcessor);
   function buildGraph(){
     if(built) return;
     if(!ensureCtx()) throw new Error('AudioContext unavailable');
+    /* Creating MediaElementSource while the context is suspended
+       steals the element's speakers and outputs into a muted graph.
+       Only capture the element once audio is actually running. */
+    if(ctx.state !== 'running') return;
 
     const srcA = ctx.createMediaElementSource(el.audio);
     let srcV = null;
@@ -462,60 +467,17 @@ registerProcessor("neonfx", NeonFXProcessor);
       mk('peaking', 4200, S.highmid, 0.9),
       mk('highshelf', 10000, S.treble)
     ];
-    let chainHead = null;
 
-    /* FX node (worklet) or bypass */
-    const useWorklet = !!(ctx.audioWorklet && el.audio);
-    if(useWorklet){
-      /* plain GainNode as the worklet input hub (both elements in) */
-      const hub = ctx.createGain();
-      srcA.connect(hub);
-      if(srcV) srcV.connect(hub);
-      fxMode = 'worklet';
-      workletNode = null;
-      const boot = new Promise((resolve, reject) => {
-        const onMsg = e => {
-          if(e.data && e.data.type === 'fail'){
-            reject(new Error(e.data.err));
-          }
-        };
-        const src = GRAN_PITCH_SRC + WORKLET_TAIL;
-        const url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
-        ctx.audioWorklet.addModule(url)
-          .then(() => {
-            try{ URL.revokeObjectURL(url); }catch(_){}
-            const node = new AudioWorkletNode(ctx, 'neonfx', {
-              numberOfInputs: 1,
-              numberOfOutputs: 1,
-              outputChannelCount: [2]
-            });
-            node.port.onmessage = onMsg;
-            node.port.postMessage({ type: 'pitch', v: 1 });
-            node.port.postMessage({ type: 'width', v: S.width / 100 });
-            hub.connect(node);
-            chainHead = node;
-            workletNode = node;
-            resolve();
-          })
-          .catch(reject);
-      });
-      boot.then(() => {
-        applySpeedPitch();
-      }).catch(() => {
-        /* fall back to coupled mode */
-        fxMode = 'coupled';
-        try{ hub.disconnect(); }catch(_){}
-        srcA.connect(eq[0]);
-        if(srcV) srcV.connect(eq[0]);
-        chainHead = null;
-        applySpeedPitch();
-        Aqua.toast('Pitch engine: coupled mode (worklet unavailable)', '⚠');
-      });
-    }else{
-      fxMode = 'coupled';
-      srcA.connect(eq[0]);
-      if(srcV) srcV.connect(eq[0]);
-    }
+    /* Direct path: element → hub → EQ → … → speakers.
+       Do NOT splice the pitch worklet into this chain — it output
+       silence (4096-sample hold + WSOLA) and killed playback. */
+    const hub = ctx.createGain();
+    hub.gain.value = 1;
+    srcA.connect(hub);
+    if(srcV) srcV.connect(hub);
+    hub.connect(eq[0]);
+    fxMode = 'coupled';
+    workletNode = null;
 
     /* reverb send/return */
     let prev = eq[4];
@@ -546,6 +508,7 @@ registerProcessor("neonfx", NeonFXProcessor);
     nodes = {
       srcA: srcA,
       srcV: srcV,
+      hub: hub,
       eq: eq,
       dry: dry,
       conv: conv,
@@ -572,9 +535,11 @@ registerProcessor("neonfx", NeonFXProcessor);
 
   /* resume on user gesture (autoplay policy) */
   function resumeCtx(){
-    if(ctx && ctx.state === 'suspended'){
-      ctx.resume().catch(() => {});
+    if(!ctx) return Promise.resolve();
+    if(ctx.state === 'suspended' || ctx.state === 'interrupted'){
+      return ctx.resume().catch(() => {});
     }
+    return Promise.resolve();
   }
 
   /* ═════════════════════════════════════════════════════════════
@@ -661,10 +626,18 @@ registerProcessor("neonfx", NeonFXProcessor);
 
   function applyVolume(){
     const v = S.muted ? 0 : AMath.clamp01(S.volume);
-    el.audio.volume = v;
-    try{ el.video.volume = v; }catch(_){}
+    /* Once the graph owns the output, keep element volume at 1 so we
+       don't square-attenuate (element * master).  Before the graph
+       exists the element is the only output. */
     if(built){
+      el.audio.volume = 1;
+      el.audio.muted = false;
+      try{ el.video.volume = 1; el.video.muted = false; }catch(_){}
       nodes.master.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+    }else{
+      el.audio.volume = v;
+      el.audio.muted = !!S.muted;
+      try{ el.video.volume = v; el.video.muted = !!S.muted; }catch(_){}
     }
   }
 
@@ -698,29 +671,52 @@ registerProcessor("neonfx", NeonFXProcessor);
       let added = 0;
       for(let i = 0; i < tracks.length; i++){
         const t = tracks[i];
-        if(!t || !t.url) continue;
-        t.url = t.url || URL.createObjectURL(t.file);
+        if(!t) continue;
+        if(!t.url){
+          if(t.src) t.url = t.src;
+          else if(t.file) t.url = URL.createObjectURL(t.file);
+          else if(t.blob) t.url = URL.createObjectURL(t.blob);
+        }
+        if(!t.url) continue;
+        if(!t.type){
+          t.type = (t.isVideo || t.kind === 'video') ? 'video' : 'audio';
+        }
         this.list.push(t);
         added++;
       }
       if(added){
         Aqua.bus.emit('queue:changed', this.list.length);
+        showDock();
+        hideDive();
         if(this.index < 0 && (opts.autoplay !== false)){
           this.play(0);
         }else{
+          if(this.index < 0) this.index = 0;
           updateDockMeta();
+          updatePod(this.current);
         }
       }
       return added;
     },
 
     play(i){
+      if(!this.list.length) return;
+      if(i == null || i === true || i === false || isNaN(i)){
+        i = this.index >= 0 ? this.index : 0;
+      }
+      i = i | 0;
       if(i < 0 || i >= this.list.length) return;
-      buildGraph();
-      resumeCtx();
+      try{ ensureCtx(); }catch(_){}
       this.index = i;
       const t = this.list[i];
+      const url = t.url || t.src;
+      if(!url){
+        Aqua.toast('Track has no audio source', '⚠');
+        return;
+      }
+      t.url = url;
       hideDive();
+      showDock();
       const media = t.type === 'video' ? el.video : el.audio;
       const other = t.type === 'video' ? el.audio : el.video;
       try{ other.pause(); }catch(_){}
@@ -729,18 +725,39 @@ registerProcessor("neonfx", NeonFXProcessor);
       }else{
         closeTheater(true);
       }
-      media.src = t.url;
-      applySpeedPitch();
-      const p = media.play();
-      if(p && p.catch){
-        p.catch(err => {
-          if(err && err.name === 'AbortError') return;
-          Aqua.toast('Playback blocked or codec unsupported', '⚠');
-          Aqua.showBanner('PLAYBACK ERROR: ' + (err && err.name || 'unknown'));
-          this.state = 'idle';
-          syncTransportUI();
-        });
+      media.muted = false;
+      if(!built){
+        media.volume = S.muted ? 0 : AMath.clamp01(S.volume);
       }
+      try{ media.pause(); }catch(_){}
+      media.src = url;
+      try{ media.currentTime = 0; }catch(_){}
+      applySpeedPitch();
+      applyVolume();
+      const start = () => {
+        try{ if(ctx && ctx.state === 'running') buildGraph(); }catch(err){
+          console.warn('[Aqua Play] graph:', err);
+        }
+        applyVolume();
+        const p = media.play();
+        if(p && p.catch){
+          p.catch(err => {
+            if(err && err.name === 'AbortError') return;
+            if(err && err.name === 'NotAllowedError'){
+              playBlocked = true;
+              this.state = 'paused';
+              syncTransportUI();
+              Aqua.toast('Hit ▶ to start audio', '▶');
+              return;
+            }
+            Aqua.toast('Playback blocked or codec unsupported', '⚠');
+            Aqua.showBanner('PLAYBACK ERROR: ' + (err && err.name || 'unknown'));
+            this.state = 'idle';
+            syncTransportUI();
+          });
+        }
+      };
+      resumeCtx().then(start);
       this.state = 'playing';
       updatePod(t);
       updateDockMeta();
@@ -763,12 +780,31 @@ registerProcessor("neonfx", NeonFXProcessor);
     },
 
     toggle(){
-      if(this.state === 'playing') this.pause();
-      else if(this.state === 'paused'){
-        const media = this.current.type === 'video' ? el.video : el.audio;
-        resumeCtx();
-        const p = media.play();
-        if(p && p.catch) p.catch(() => {});
+      const t = this.current;
+      const media = t ? (t.type === 'video' ? el.video : el.audio) : el.audio;
+      const actuallyPlaying = !!(t && media && !media.paused);
+      /* If the graph is suspended the element can look "playing" while
+         you hear nothing — wake the context instead of pausing. */
+      if(ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')){
+        resumeCtx().then(() => {
+          if(t){
+            media.muted = false;
+            const p = media.play();
+            if(p && p.catch) p.catch(() => {});
+          }
+        });
+        this.state = 'playing';
+        syncTransportUI();
+        setLed(true);
+        return;
+      }
+      if(actuallyPlaying) this.pause();
+      else if(t){
+        resumeCtx().then(() => {
+          media.muted = false;
+          const p = media.play();
+          if(p && p.catch) p.catch(() => {});
+        });
         this.state = 'playing';
         syncTransportUI();
         Aqua.bus.emit('audio:playing', true);
@@ -801,8 +837,10 @@ registerProcessor("neonfx", NeonFXProcessor);
 
     prev(){
       if(!this.list.length) return;
-      const media = this.current.type === 'video' ? el.video : el.audio;
-      if(media.currentTime > 3){
+      if(this.index < 0){ this.play(0); return; }
+      const cur = this.current;
+      const media = (cur && cur.type === 'video') ? el.video : el.audio;
+      if(media && media.currentTime > 3){
         media.currentTime = 0;
         return;
       }
@@ -896,6 +934,31 @@ registerProcessor("neonfx", NeonFXProcessor);
 
   function hideDive(){
     if(el.dive) el.dive.classList.remove('on');
+  }
+
+  function showDock(){
+    if(el.dock) el.dock.classList.add('show');
+  }
+
+  function unlockAudio(){
+    /* Wake the AudioContext on a real gesture.  Attach the Web Audio
+       graph only after it is running so the <audio> element can still
+       speak natively if the context is blocked. */
+    try{ ensureCtx(); }catch(_){}
+    playBlocked = false;
+    resumeCtx().then(() => {
+      if(ctx && ctx.state === 'running'){
+        try{ buildGraph(); }catch(_){}
+      }
+      if(Q.state === 'playing' && Q.current){
+        const t = Q.current;
+        const media = t.type === 'video' ? el.video : el.audio;
+        if(media && media.paused){
+          const p = media.play();
+          if(p && p.catch) p.catch(() => {});
+        }
+      }
+    });
   }
 
   function setLed(playing){
@@ -1004,6 +1067,30 @@ registerProcessor("neonfx", NeonFXProcessor);
       el.seek.addEventListener('input', () => {
         const d = Q.duration;
         if(d > 0) Q.seek((el.seek.value / 1000) * d);
+      });
+    }
+
+    const dockProg = Aqua.el('dockProg');
+    if(dockProg){
+      const seekFromEvent = (e) => {
+        const d = Q.duration;
+        if(!(d > 0)) return;
+        const rect = dockProg.getBoundingClientRect();
+        const frac = AMath.clamp01((e.clientX - rect.left) / (rect.width || 1));
+        Q.seek(frac * d);
+      };
+      dockProg.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        seeking = true;
+        seekFromEvent(e);
+        const move = (ev) => seekFromEvent(ev);
+        const up = () => {
+          seeking = false;
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
       });
     }
 
@@ -1372,6 +1459,16 @@ registerProcessor("neonfx", NeonFXProcessor);
 
   /* volume from settings (element-level, no ctx needed) */
   el.audio.volume = S.muted ? 0 : S.volume;
+  try{ el.audio.preload = 'auto'; el.audio.setAttribute('playsinline', ''); }catch(_){}
+  try{ if(el.video){ el.video.preload = 'metadata'; el.video.setAttribute('playsinline', ''); } }catch(_){}
+
+  /* first gesture wakes AudioContext (autoplay policy) */
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev => {
+    window.addEventListener(ev, unlockAudio, { capture: true, passive: true });
+  });
+
+  /* dock is the transport — slide it in so play is always reachable */
+  requestAnimationFrame(() => showDock());
 
   syncTransportUI();
   requestAnimationFrame(analysisLoop);
